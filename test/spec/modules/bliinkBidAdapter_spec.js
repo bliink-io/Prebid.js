@@ -1168,3 +1168,7 @@ describe('getEffectiveConnectionType', () => {
     });
   }
 });
+
+it('should expose gvlid', function () {
+  expect(spec.gvlid).to.equal(157);
+});

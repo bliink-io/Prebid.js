@@ -343,6 +343,7 @@ const getUserSyncs = (syncOptions, serverResponses, gdprConsent, uspConsent) => 
  */
 export const spec = {
   code: BIDDER_CODE,
+  gvlid: 658,
   aliases: aliasBidderCode,
   supportedMediaTypes: supportedMediaTypes,
   isBidRequestValid,
