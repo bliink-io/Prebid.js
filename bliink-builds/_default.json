@@ -1,0 +1,38 @@
+{
+  "siteId": "_default",
+  "adapters": [
+    "adagio",
+    "adyoulike",
+    "appnexus",
+    "bliink",
+    "criteo",
+    "equativ",
+    "invibes",
+    "mediasquare",
+    "missena",
+    "mobkoi",
+    "ogury",
+    "onetag",
+    "optidigital",
+    "pubmatic",
+    "richaudience",
+    "rtbhouse",
+    "rubicon",
+    "seedtag",
+    "teads",
+    "medianet",
+    "ix"
+  ],
+  "modules": [
+    "priceFloors",
+    "currency",
+    "consentManagementTcf",
+    "consentManagementUsp",
+    "consentManagementGpp",
+    "userId",
+    "id5IdSystem",
+    "rtdModule",
+    "adagioRtdProvider",
+    "schain"
+  ]
+}
