@@ -3,6 +3,9 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
+// Path to prebid-client for local sync
+const PREBID_CLIENT_PATH = path.join(__dirname, '../../prebid-client/public/prebid');
+
 /**
  * Get all available modules in the Prebid.js modules directory
  * @returns {Set<string>} Set of module names (without extension)
@@ -53,7 +56,8 @@ function validateModules(adapters, modules) {
   return { valid: errors.length === 0, errors };
 }
 
-function buildForSite(siteId) {
+function buildForSite(siteId, options = {}) {
+  const { sync = false } = options;
   const configPath = path.join(__dirname, '../bliink-builds', `${siteId}.json`);
 
   if (!fs.existsSync(configPath)) {
@@ -79,16 +83,39 @@ function buildForSite(siteId) {
     ...config.modules
   ].join(',');
 
+  const globalVarName = config.globalVarName || 'pbjs';
+
   console.log(`\n=== Building Prebid.js for ${siteId} ===`);
   console.log(`Adapters: ${config.adapters.length}`);
   console.log(`Modules: ${config.modules.length}`);
   console.log(`Total modules: ${modules.split(',').length}`);
+  console.log(`Global var: ${globalVarName}`);
 
-  // Build
-  execSync(`npx gulp build --modules=${modules}`, {
-    stdio: 'inherit',
-    cwd: path.join(__dirname, '..')
-  });
+  // Handle custom globalVarName by temporarily modifying package.json
+  const packageJsonPath = path.join(__dirname, '../package.json');
+  let originalPackageJson = null;
+
+  if (config.globalVarName) {
+    originalPackageJson = fs.readFileSync(packageJsonPath, 'utf8');
+    const packageJson = JSON.parse(originalPackageJson);
+    packageJson.globalVarName = config.globalVarName;
+    fs.writeFileSync(packageJsonPath, JSON.stringify(packageJson, null, 2));
+    console.log(`→ Set globalVarName to "${config.globalVarName}" in package.json`);
+  }
+
+  try {
+    // Build
+    execSync(`npx gulp build --modules=${modules}`, {
+      stdio: 'inherit',
+      cwd: path.join(__dirname, '..')
+    });
+  } finally {
+    // Restore package.json if modified
+    if (originalPackageJson) {
+      fs.writeFileSync(packageJsonPath, originalPackageJson);
+      console.log(`→ Restored original package.json`);
+    }
+  }
 
   // Create output directory
   const outputDir = path.join(__dirname, '../dist/sites');
@@ -116,6 +143,7 @@ function buildForSite(siteId) {
   // Write the manifest
   const manifest = {
     siteId,
+    globalVarName,
     hash,
     size: stats.size,
     adapters: config.adapters,
@@ -127,15 +155,34 @@ function buildForSite(siteId) {
     JSON.stringify(manifest, null, 2)
   );
 
+  // Sync to prebid-client if requested
+  if (sync) {
+    if (!fs.existsSync(PREBID_CLIENT_PATH)) {
+      console.error(`\n⚠ prebid-client not found at: ${PREBID_CLIENT_PATH}`);
+      console.error('  Make sure prebid-client repo is cloned alongside Prebid.js');
+    } else {
+      const syncPath = path.join(PREBID_CLIENT_PATH, `${siteId}.js`);
+      fs.copyFileSync(latestPath, syncPath);
+      console.log(`\n✓ Synced to prebid-client: ${syncPath}`);
+    }
+  }
+
   return { siteId, hash, size: stats.size };
 }
 
 // Main
-const siteId = process.argv[2];
+const args = process.argv.slice(2);
+const sync = args.includes('--sync');
+const siteId = args.find(arg => !arg.startsWith('--'));
+
 if (!siteId) {
-  console.error('Usage: node scripts/build-for-site.js <siteId>');
-  console.error('Example: node scripts/build-for-site.js MAGAZINEAVANTAGES');
+  console.error('Usage: node scripts/build-for-site.js <siteId> [--sync]');
+  console.error('');
+  console.error('Options:');
+  console.error('  --sync    Copy built file to prebid-client/public/prebid/');
+  console.error('');
+  console.error('Example: node scripts/build-for-site.js MAGAZINEAVANTAGES_GMC --sync');
   process.exit(1);
 }
 
-buildForSite(siteId);
+buildForSite(siteId, { sync });

@@ -1,0 +1,39 @@
+{
+  "siteId": "MAGAZINEAVANTAGES_GMC",
+  "globalVarName": "bliink_core_pbjs",
+  "adapters": [
+    "adagio",
+    "adyoulike",
+    "appnexus",
+    "bliink",
+    "criteo",
+    "equativ",
+    "invibes",
+    "mediasquare",
+    "missena",
+    "mobkoi",
+    "ogury",
+    "onetag",
+    "optidigital",
+    "pubmatic",
+    "richaudience",
+    "rtbhouse",
+    "rubicon",
+    "seedtag",
+    "smartadserver",
+    "teads",
+    "medianet"
+  ],
+  "modules": [
+    "priceFloors",
+    "currency",
+    "consentManagementTcf",
+    "consentManagementUsp",
+    "consentManagementGpp",
+    "userId",
+    "id5IdSystem",
+    "rtdModule",
+    "adagioRtdProvider",
+    "schain"
+  ]
+}
