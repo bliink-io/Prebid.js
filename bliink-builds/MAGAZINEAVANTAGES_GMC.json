@@ -9,6 +9,7 @@
     "criteo",
     "equativ",
     "invibes",
+    "medianet",
     "mediasquare",
     "missena",
     "mobkoi",
@@ -20,9 +21,7 @@
     "rtbhouse",
     "rubicon",
     "seedtag",
-    "smartadserver",
-    "teads",
-    "medianet"
+    "teads"
   ],
   "modules": [
     "priceFloors",
@@ -31,9 +30,16 @@
     "consentManagementUsp",
     "consentManagementGpp",
     "userId",
-    "id5IdSystem",
+    "criteoIdSystem",
+    "identityLinkIdSystem",
+    "pairIdSystem",
+    "pubProvidedIdSystem",
     "rtdModule",
     "adagioRtdProvider",
+    "sirdataRtdProvider",
+    "permutiveRtdProvider",
+    "paapi",
+    "paapiForGpt",
     "schain"
   ]
 }
