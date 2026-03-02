@@ -40,6 +40,7 @@
     "permutiveRtdProvider",
     "paapi",
     "paapiForGpt",
-    "schain"
+    "schain",
+    "nativeRendering"
   ]
 }
