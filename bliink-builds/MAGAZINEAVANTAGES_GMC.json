@@ -21,6 +21,7 @@
     "rtbhouse",
     "rubicon",
     "seedtag",
+    "smilewanted",
     "teads"
   ],
   "modules": [
@@ -40,7 +41,9 @@
     "permutiveRtdProvider",
     "paapi",
     "paapiForGpt",
+    "prebidServerBidAdapter",
     "schain",
-    "nativeRendering"
+    "nativeRendering",
+    "s2sTesting"
   ]
 }

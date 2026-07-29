@@ -3,7 +3,6 @@ import {config} from '../src/config.js';
 import {registerBidder} from '../src/adapters/bidderFactory.js';
 import {BANNER, NATIVE, VIDEO} from '../src/mediaTypes.js';
 import { convertOrtbRequestToProprietaryNative } from '../src/native.js';
-import {Renderer} from '../src/Renderer.js';
 import { getRefererInfo } from '../src/refererDetection.js';
 
 /**
@@ -20,8 +19,6 @@ const BIDDER_URL_PROD = 'https://pbs-front.mediasquare.fr/'
 const BIDDER_URL_TEST = 'https://bidder-test.mediasquare.fr/'
 const BIDDER_ENDPOINT_AUCTION = 'msq_prebid';
 const BIDDER_ENDPOINT_WINNING = 'winning';
-
-const OUTSTREAM_RENDERER_URL = 'https://acdn.adnxs.com/video/outstream/ANOutstreamVideo.js';
 
 export const spec = {
   code: BIDDER_CODE,
@@ -146,7 +143,10 @@ export const spec = {
           if ('url' in value['video']) { bidResponse['vastUrl'] = value['video']['url'] }
           if ('xml' in value['video']) { bidResponse['vastXml'] = value['video']['xml'] }
           bidResponse['mediaType'] = 'video';
-          bidResponse['renderer'] = createRenderer(value, OUTSTREAM_RENDERER_URL);
+          // Renderer removed: Mediasquare's AppNexus ANOutstreamVideo renderer does not
+          // work in our context (Bliink Full Wrapper + GAM). By not setting bid.renderer,
+          // Prebid.js falls back to our adUnit-level BliinkPlayer renderer which handles
+          // autoplay, viewability-based expansion, and muted playback correctly.
         }
         if (value.hasOwnProperty('deal_id')) { bidResponse['dealId'] = value['deal_id']; }
         bidResponses.push(bidResponse);
@@ -206,36 +206,6 @@ export const spec = {
     return true;
   }
 
-}
-
-function outstreamRender(bid) {
-  bid.renderer.push(() => {
-    window.ANOutstreamVideo.renderAd({
-      sizes: [bid.width, bid.height],
-      targetId: bid.adUnitCode,
-      adResponse: bid.adResponse,
-      rendererOptions: {
-        showBigPlayButton: false,
-        showProgressBar: 'bar',
-        showVolume: false,
-        allowFullscreen: true,
-        skippable: false,
-        content: bid.vastXml
-      }
-    });
-  });
-}
-
-function createRenderer(bid, url) {
-  const renderer = Renderer.install({
-    id: bid.bidId,
-    url: url,
-    loaded: false,
-    adUnitCode: bid.adUnitCode,
-    targetId: bid.adUnitCode
-  });
-  renderer.setRender(outstreamRender);
-  return renderer;
 }
 
 registerBidder(spec);
