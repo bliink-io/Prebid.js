@@ -44,6 +44,7 @@
     "prebidServerBidAdapter",
     "schain",
     "nativeRendering",
+    "gmcMediasquareRendererOverride",
     "s2sTesting"
   ]
 }
