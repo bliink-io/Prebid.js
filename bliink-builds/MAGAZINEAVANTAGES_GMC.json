@@ -21,6 +21,7 @@
     "rtbhouse",
     "rubicon",
     "seedtag",
+    "smilewanted",
     "teads"
   ],
   "modules": [
@@ -33,6 +34,7 @@
     "criteoIdSystem",
     "identityLinkIdSystem",
     "pairIdSystem",
+    "pubmaticIdSystem",
     "pubProvidedIdSystem",
     "rtdModule",
     "adagioRtdProvider",
@@ -40,7 +42,10 @@
     "permutiveRtdProvider",
     "paapi",
     "paapiForGpt",
+    "prebidServerBidAdapter",
     "schain",
-    "nativeRendering"
+    "nativeRendering",
+    "gmcMediasquareRendererOverride",
+    "s2sTesting"
   ]
 }
