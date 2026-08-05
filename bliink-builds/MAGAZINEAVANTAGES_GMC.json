@@ -33,6 +33,7 @@
     "criteoIdSystem",
     "identityLinkIdSystem",
     "pairIdSystem",
+    "pubmaticIdSystem",
     "pubProvidedIdSystem",
     "rtdModule",
     "adagioRtdProvider",
