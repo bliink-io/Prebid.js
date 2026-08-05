@@ -21,6 +21,7 @@
     "rtbhouse",
     "rubicon",
     "seedtag",
+    "smilewanted",
     "teads"
   ],
   "modules": [
@@ -41,7 +42,10 @@
     "permutiveRtdProvider",
     "paapi",
     "paapiForGpt",
+    "prebidServerBidAdapter",
     "schain",
-    "nativeRendering"
+    "nativeRendering",
+    "gmcMediasquareRendererOverride",
+    "s2sTesting"
   ]
 }
