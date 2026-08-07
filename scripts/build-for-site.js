@@ -2,6 +2,7 @@ const { execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { assertPublishedSyncSource } = require('./sync-source-guard');
 
 // Path to prebid-client for local sync
 const PREBID_CLIENT_PATH = path.join(__dirname, '../../prebid-client/public/prebid');
@@ -64,6 +65,10 @@ function buildForSite(siteId, options = {}) {
     console.error(`Config not found: ${configPath}`);
     process.exit(1);
   }
+
+  const syncSource = sync
+    ? assertPublishedSyncSource(path.join(__dirname, '..'))
+    : null;
 
   const config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
 
@@ -161,9 +166,17 @@ function buildForSite(siteId, options = {}) {
       console.error(`\n⚠ prebid-client not found at: ${PREBID_CLIENT_PATH}`);
       console.error('  Make sure prebid-client repo is cloned alongside Prebid.js');
     } else {
+      const verifiedSource = assertPublishedSyncSource(path.join(__dirname, '..'));
+      if (
+        verifiedSource.upstream !== syncSource.upstream ||
+        verifiedSource.commit !== syncSource.commit
+      ) {
+        throw new Error('Refusing --sync because the published source changed during the build.');
+      }
       const syncPath = path.join(PREBID_CLIENT_PATH, `${siteId}.js`);
       fs.copyFileSync(latestPath, syncPath);
       console.log(`\n✓ Synced to prebid-client: ${syncPath}`);
+      console.log(`✓ Source: ${syncSource.upstream}@${syncSource.commit}`);
     }
   }
 
