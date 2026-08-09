@@ -108,6 +108,17 @@ type S2SConfig = {
    */
   syncTimeout?: number;
   /**
+   * Bliink opt-in: wait briefly for the first PBS cookie-sync batch before
+   * dispatching the first auction. This is a local client setting and is never
+   * forwarded in the OpenRTB request.
+   */
+  bliinkAwaitFirstSync?: boolean;
+  /**
+   * Maximum time spent waiting for that first batch. Sync workers continue
+   * after this deadline so later auctions can still benefit.
+   */
+  bliinkFirstSyncTimeout?: number;
+  /**
    * Functions to modify a bidder’s sync url before the actual call to the sync endpoint.
    * Bidder must be enabled for s2sConfig.
    */
@@ -314,24 +325,50 @@ function queueSync(bidderCodes, gdprConsent, uspConsent, gppConsent, s2sConfig: 
   }
 
   const jsonPayload = JSON.stringify(payload);
-  ajax(getMatchingConsentUrl(s2sConfig.syncEndpoint, gdprConsent),
-    (response) => {
-      try {
-        const responseJson = JSON.parse(response);
-        doAllSyncs(responseJson.bidder_status, s2sConfig);
-      } catch (e) {
-        logError(e);
-      }
-    },
-    jsonPayload,
-    {
-      contentType: 'text/plain',
-      withCredentials: true
-    });
+  return new Promise<void>((resolve) => {
+    const finish = () => resolve();
+
+    try {
+      ajax(getMatchingConsentUrl(s2sConfig.syncEndpoint, gdprConsent),
+        {
+          success: (response) => {
+            try {
+              const responseJson = JSON.parse(response);
+              const bidders = Array.isArray(responseJson.bidder_status) ? responseJson.bidder_status : [];
+
+              if (s2sConfig.bliinkAwaitFirstSync) {
+                doConcurrentSyncs(bidders, s2sConfig).then(finish, (error) => {
+                  logError('Bliink S2S cookie sync workers failed', error);
+                  finish();
+                });
+              } else {
+                doAllSyncs(bidders, s2sConfig, finish);
+              }
+            } catch (e) {
+              logError(e);
+              finish();
+            }
+          },
+          error: () => {
+            logError('Prebid Server cookie sync request failed');
+            finish();
+          }
+        },
+        jsonPayload,
+        {
+          contentType: 'text/plain',
+          withCredentials: true
+        });
+    } catch (e) {
+      logError('Prebid Server cookie sync request threw before completion', e);
+      finish();
+    }
+  });
 }
 
-function doAllSyncs(bidders, s2sConfig) {
+function doAllSyncs(bidders, s2sConfig, done = () => {}) {
   if (bidders.length === 0) {
+    done();
     return;
   }
 
@@ -340,11 +377,81 @@ function doAllSyncs(bidders, s2sConfig) {
 
   // if PBS reports this bidder doesn't have an ID, then call the sync and recurse to the next sync entry
   if (thisSync.no_cookie) {
-    doPreBidderSync(thisSync.usersync.type, thisSync.usersync.url, thisSync.bidder, doAllSyncs.bind(null, bidders, s2sConfig), s2sConfig);
+    try {
+      doPreBidderSync(thisSync.usersync?.type, thisSync.usersync?.url, thisSync.bidder, doAllSyncs.bind(null, bidders, s2sConfig, done), s2sConfig);
+    } catch (e) {
+      logError(`Cookie sync failed for bidder "${thisSync.bidder}"`, e);
+      doAllSyncs(bidders, s2sConfig, done);
+    }
   } else {
     // bidder already has an ID, so just recurse to the next sync entry
-    doAllSyncs(bidders, s2sConfig);
+    doAllSyncs(bidders, s2sConfig, done);
   }
+}
+
+function syncOneBidder(status, s2sConfig) {
+  return new Promise<void>((resolve) => {
+    if (!status?.no_cookie) {
+      resolve();
+      return;
+    }
+
+    logMessage(`Bliink S2S cookie sync started for bidder: "${status.bidder}"`);
+    const done = () => {
+      logMessage(`Bliink S2S cookie sync completed for bidder: "${status.bidder}"`);
+      resolve();
+    };
+
+    try {
+      doPreBidderSync(status.usersync?.type, status.usersync?.url, status.bidder, done, s2sConfig);
+    } catch (e) {
+      logError(`Cookie sync failed for bidder "${status.bidder}"`, e);
+      done();
+    }
+  });
+}
+
+function doConcurrentSyncs(bidders, s2sConfig) {
+  const queue = bidders.slice();
+  logMessage(`Bliink S2S cookie sync response order: ${queue.map(status => status.bidder).join(',')}`);
+
+  const worker = async () => {
+    while (queue.length > 0) {
+      const status = queue.shift();
+      await syncOneBidder(status, s2sConfig);
+    }
+  };
+
+  const firstBatch = queue.splice(0, 2);
+  return Promise.all(firstBatch.map(async (status) => {
+    await syncOneBidder(status, s2sConfig);
+    void worker().catch((error) => logError('Bliink S2S background cookie sync worker failed', error));
+  })).then(() => undefined);
+}
+
+function waitForFirstSync(syncPromise, timeout) {
+  return new Promise<void>((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (!settled) {
+        settled = true;
+        resolve();
+      }
+    };
+    const timer = setTimeout(() => {
+      logWarn(`Bliink S2S first cookie sync wait reached ${timeout}ms; auction continues`);
+      finish();
+    }, timeout);
+
+    syncPromise.then(() => {
+      clearTimeout(timer);
+      finish();
+    }, (error) => {
+      clearTimeout(timer);
+      logError('Bliink S2S first cookie sync wait failed; auction continues', error);
+      finish();
+    });
+  });
 }
 
 /**
@@ -482,16 +589,17 @@ export function PrebidServer() {
     const { gdprConsent, uspConsent, gppConsent } = getConsentData(bidRequests);
 
     if (Array.isArray(_s2sConfigs)) {
+      let firstSyncPromise;
       if (s2sBidRequest.s2sConfig && s2sBidRequest.s2sConfig.syncEndpoint && getMatchingConsentUrl(s2sBidRequest.s2sConfig.syncEndpoint, gdprConsent)) {
         const s2sAliases = (s2sBidRequest.s2sConfig.extPrebid && s2sBidRequest.s2sConfig.extPrebid.aliases) ?? {};
         const syncBidders = s2sBidRequest.s2sConfig.bidders
           .map(bidder => adapterManager.aliasRegistry[bidder] || s2sAliases[bidder] || bidder)
           .filter((bidder, index, array) => (array.indexOf(bidder) === index));
 
-        queueSync(syncBidders, gdprConsent, uspConsent, gppConsent, s2sBidRequest.s2sConfig);
+        firstSyncPromise = queueSync(syncBidders, gdprConsent, uspConsent, gppConsent, s2sBidRequest.s2sConfig);
       }
 
-      processPBSRequest(s2sBidRequest, bidRequests, ajax, {
+      const dispatchAuction = () => processPBSRequest(s2sBidRequest, bidRequests, ajax, {
         onResponse: function (isValid, requestedBidders, response) {
           if (isValid) {
             bidRequests.forEach(bidderRequest => events.emit(EVENTS.BIDDER_DONE, bidderRequest));
@@ -550,7 +658,14 @@ export function PrebidServer() {
             addPaapiConfig({auctionId: bidRequests[0].auctionId, ...params}, {config: params.config});
           })
         }
-      })
+      });
+
+      const firstSyncTimeout = s2sBidRequest.s2sConfig.bliinkFirstSyncTimeout;
+      if (s2sBidRequest.s2sConfig.bliinkAwaitFirstSync && firstSyncPromise && isNumber(firstSyncTimeout) && firstSyncTimeout > 0 && firstSyncTimeout <= 1000) {
+        waitForFirstSync(firstSyncPromise, firstSyncTimeout).then(dispatchAuction);
+      } else {
+        dispatchAuction();
+      }
     }
   };
 
