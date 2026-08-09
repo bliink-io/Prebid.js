@@ -3717,6 +3717,18 @@ describe('S2S Adapter', function () {
         csRes = utils.deepClone(RESPONSE_NO_COOKIE);
       });
 
+      function waitForRequestCount(count) {
+        return new Promise((resolve, reject) => {
+          const deadline = Date.now() + 1000;
+          const check = () => {
+            if (server.requests.length === count) return resolve();
+            if (Date.now() >= deadline) return reject(new Error(`expected ${count} requests, got ${server.requests.length}`));
+            setTimeout(check, 0);
+          };
+          check();
+        });
+      }
+
       afterEach(() => {
         resetSyncedStatus();
       })
@@ -3732,6 +3744,143 @@ describe('S2S Adapter', function () {
           server.requests[0].respond(200, {}, JSON.stringify(csRes));
           expect(syncer().args[0]).to.include.members([123]);
         });
+      });
+
+      it('keeps the auction dispatch immediate when the Bliink wait flag is disabled', () => {
+        const syncCallbacks = [];
+        utils.insertUserSyncIframe.callsFake((url, done) => syncCallbacks.push(done));
+
+        adapter.callBids(req, BID_REQUESTS, addBidResponse, done, ajax);
+        expect(server.requests).to.have.length(2);
+
+        server.requests[0].respond(200, {}, JSON.stringify(csRes));
+        expect(syncCallbacks).to.have.length(1);
+        expect(server.requests).to.have.length(2);
+
+        syncCallbacks.forEach(callback => callback());
+      });
+
+      it('waits for the first two FIFO sync workers before dispatching the first auction', async () => {
+        const syncCallbacks = [];
+        const startedUrls = [];
+        utils.insertUserSyncIframe.callsFake((url, done) => {
+          startedUrls.push(url);
+          syncCallbacks.push(done);
+        });
+        cfg.bliinkAwaitFirstSync = true;
+        cfg.bliinkFirstSyncTimeout = 500;
+        csRes.bidder_status = [
+          {bidder: 'onetag', no_cookie: true, usersync: {type: 'iframe', url: 'https://sync.test/onetag'}},
+          {bidder: 'pubmatic', no_cookie: true, usersync: {type: 'iframe', url: 'https://sync.test/pubmatic'}},
+          {bidder: 'smilewanted', no_cookie: true, usersync: {type: 'iframe', url: 'https://sync.test/smilewanted'}}
+        ];
+
+        adapter.callBids(req, BID_REQUESTS, addBidResponse, done, ajax);
+        expect(server.requests).to.have.length(1);
+        server.requests[0].respond(200, {}, JSON.stringify(csRes));
+
+        expect(startedUrls).to.deep.equal(['https://sync.test/onetag', 'https://sync.test/pubmatic']);
+        expect(server.requests).to.have.length(1);
+
+        syncCallbacks[0]();
+        await Promise.resolve();
+        expect(startedUrls).to.deep.equal([
+          'https://sync.test/onetag',
+          'https://sync.test/pubmatic',
+          'https://sync.test/smilewanted'
+        ]);
+        expect(server.requests).to.have.length(1);
+
+        syncCallbacks[1]();
+        await waitForRequestCount(2);
+        expect(server.requests).to.have.length(2);
+        const auctionBody = JSON.parse(server.requests[1].requestBody);
+        expect(auctionBody.ext.prebid).not.to.have.property('bliinkAwaitFirstSync');
+        expect(auctionBody.ext.prebid).not.to.have.property('bliinkFirstSyncTimeout');
+
+        syncCallbacks[2]();
+      });
+
+      it('dispatches after the bounded wait while sync workers keep running', async () => {
+        const clock = sinon.useFakeTimers({shouldClearNativeTimers: true});
+        const syncCallbacks = [];
+        const startedUrls = [];
+        utils.insertUserSyncIframe.callsFake((url, done) => {
+          startedUrls.push(url);
+          syncCallbacks.push(done);
+        });
+        cfg.bliinkAwaitFirstSync = true;
+        cfg.bliinkFirstSyncTimeout = 50;
+        csRes.bidder_status = [
+          {bidder: 'onetag', no_cookie: true, usersync: {type: 'iframe', url: 'https://sync.test/onetag'}},
+          {bidder: 'pubmatic', no_cookie: true, usersync: {type: 'iframe', url: 'https://sync.test/pubmatic'}},
+          {bidder: 'smilewanted', no_cookie: true, usersync: {type: 'iframe', url: 'https://sync.test/smilewanted'}}
+        ];
+
+        adapter.callBids(req, BID_REQUESTS, addBidResponse, done, ajax);
+        server.requests[0].respond(200, {}, JSON.stringify(csRes));
+        expect(server.requests).to.have.length(1);
+        expect(syncCallbacks).to.have.length(2);
+
+        await clock.tickAsync(50);
+        expect(server.requests).to.have.length(2);
+
+        syncCallbacks[0]();
+        await clock.tickAsync(0);
+        expect(startedUrls).to.deep.equal([
+          'https://sync.test/onetag',
+          'https://sync.test/pubmatic',
+          'https://sync.test/smilewanted'
+        ]);
+
+        syncCallbacks.slice(1).forEach(callback => callback());
+        clock.restore();
+      });
+
+      it('does not wait when the configured first-sync timeout is outside the safety bound', () => {
+        cfg.bliinkAwaitFirstSync = true;
+        cfg.bliinkFirstSyncTimeout = 1001;
+
+        adapter.callBids(req, BID_REQUESTS, addBidResponse, done, ajax);
+
+        expect(server.requests).to.have.length(2);
+      });
+
+      it('fails open when the cookie sync request fails', async () => {
+        cfg.bliinkAwaitFirstSync = true;
+        cfg.bliinkFirstSyncTimeout = 500;
+
+        adapter.callBids(req, BID_REQUESTS, addBidResponse, done, ajax);
+        expect(server.requests).to.have.length(1);
+        server.requests[0].respond(500, {}, 'sync failed');
+        await Promise.resolve();
+        await Promise.resolve();
+
+        expect(server.requests).to.have.length(2);
+      });
+
+      it('fails open when a bidder sync throws', async () => {
+        cfg.bliinkAwaitFirstSync = true;
+        cfg.bliinkFirstSyncTimeout = 500;
+        utils.insertUserSyncIframe.throws(new Error('sync iframe failed'));
+
+        adapter.callBids(req, BID_REQUESTS, addBidResponse, done, ajax);
+        server.requests[0].respond(200, {}, JSON.stringify(csRes));
+        await waitForRequestCount(2);
+
+        expect(server.requests).to.have.length(2);
+        sinon.assert.calledWith(utils.logError, sinon.match('Cookie sync failed for bidder'));
+      });
+
+      it('does not wait when no consent-matching sync endpoint exists', () => {
+        cfg.bliinkAwaitFirstSync = true;
+        cfg.bliinkFirstSyncTimeout = 500;
+        cfg.syncEndpoint = {};
+
+        adapter.callBids(req, BID_REQUESTS, addBidResponse, done, ajax);
+
+        expect(server.requests).to.have.length(1);
+        expect(server.requests[0].url).to.include('/openrtb2/auction');
       });
     });
     describe('when the response contains ext.prebid.fledge', () => {
