@@ -3801,6 +3801,36 @@ describe('S2S Adapter', function () {
         syncCallbacks[2]();
       });
 
+      it('uses requested bidder order when PBS returns sync statuses out of order', async () => {
+        const startedUrls = [];
+        const syncCallbacks = [];
+        utils.insertUserSyncIframe.callsFake((url, callback) => {
+          startedUrls.push(url);
+          syncCallbacks.push(callback);
+        });
+        cfg.bliinkAwaitFirstSync = true;
+        cfg.bliinkFirstSyncTimeout = 500;
+        cfg.bidders = ['onetag', 'pubmatic', 'smilewanted', 'adyoulike'];
+        csRes.bidder_status = [
+          {bidder: 'smilewanted', no_cookie: true, usersync: {type: 'iframe', url: 'https://sync.test/smilewanted'}},
+          {bidder: 'adyoulike', no_cookie: true, usersync: {type: 'iframe', url: 'https://sync.test/adyoulike'}},
+          {bidder: 'pubmatic', no_cookie: true, usersync: {type: 'iframe', url: 'https://sync.test/pubmatic'}},
+          {bidder: 'onetag', no_cookie: true, usersync: {type: 'iframe', url: 'https://sync.test/onetag'}}
+        ];
+
+        adapter.callBids(req, BID_REQUESTS, addBidResponse, done, ajax);
+        server.requests[0].respond(200, {}, JSON.stringify(csRes));
+
+        expect(startedUrls).to.deep.equal([
+          'https://sync.test/onetag',
+          'https://sync.test/pubmatic'
+        ]);
+
+        syncCallbacks.slice(0, 2).forEach(callback => callback());
+        await waitForRequestCount(2);
+        syncCallbacks.slice(2).forEach(callback => callback());
+      });
+
       it('dispatches after the bounded wait while sync workers keep running', async () => {
         const clock = sinon.useFakeTimers({shouldClearNativeTimers: true});
         const syncCallbacks = [];
