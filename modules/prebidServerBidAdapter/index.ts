@@ -334,9 +334,10 @@ function queueSync(bidderCodes, gdprConsent, uspConsent, gppConsent, s2sConfig: 
           success: (response) => {
             try {
               const responseJson = JSON.parse(response);
-              const bidders = Array.isArray(responseJson.bidder_status) ? responseJson.bidder_status : [];
+              let bidders = Array.isArray(responseJson.bidder_status) ? responseJson.bidder_status : [];
 
               if (s2sConfig.bliinkAwaitFirstSync) {
+                bidders = orderSyncsByRequestedBidders(bidders, bidderCodes);
                 doConcurrentSyncs(bidders, s2sConfig).then(finish, (error) => {
                   logError('Bliink S2S cookie sync workers failed', error);
                   finish();
@@ -427,6 +428,19 @@ function doConcurrentSyncs(bidders, s2sConfig) {
     await syncOneBidder(status, s2sConfig);
     void worker().catch((error) => logError('Bliink S2S background cookie sync worker failed', error));
   })).then(() => undefined);
+}
+
+function orderSyncsByRequestedBidders(statuses: any[], bidderCodes: string[]) {
+  const requestedOrder = new Map<string, number>(bidderCodes.map((bidder, index) => [bidder, index]));
+
+  return statuses
+    .map((status, responseIndex) => ({status, responseIndex}))
+    .sort((left, right) => {
+      const leftIndex = requestedOrder.get(left.status.bidder) ?? Number.MAX_SAFE_INTEGER;
+      const rightIndex = requestedOrder.get(right.status.bidder) ?? Number.MAX_SAFE_INTEGER;
+      return leftIndex - rightIndex || left.responseIndex - right.responseIndex;
+    })
+    .map(({status}) => status);
 }
 
 function waitForFirstSync(syncPromise, timeout) {
