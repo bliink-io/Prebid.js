@@ -3,8 +3,10 @@ import {
   PrebidServer as Adapter,
   resetSyncedStatus,
   validateConfig,
-  s2sDefaultConfig
+  s2sDefaultConfig,
+  prewarmS2SCookieSync
 } from 'modules/prebidServerBidAdapter/index.js';
+import {allConsent} from 'src/consentHandler.js';
 import adapterManager, {PBS_ADAPTER_NAME} from 'src/adapterManager.js';
 import * as utils from 'src/utils.js';
 import {deepAccess, deepClone, getWinDimensions, mergeDeep} from 'src/utils.js';
@@ -3911,6 +3913,130 @@ describe('S2S Adapter', function () {
 
         expect(server.requests).to.have.length(1);
         expect(server.requests[0].url).to.include('/openrtb2/auction');
+      });
+
+      describe('Bliink cookie_sync prewarm', () => {
+        let sandbox;
+        beforeEach(() => {
+          cfg.bliinkAwaitFirstSync = true;
+          cfg.bliinkFirstSyncTimeout = 500;
+          config.setConfig({ s2sConfig: cfg });
+          sandbox = sinon.createSandbox();
+          sandbox.stub(allConsent, 'promise').get(() => Promise.resolve());
+          sandbox.stub(allConsent, 'getConsentData').returns({ gdpr: undefined, usp: undefined, gpp: undefined });
+          // insertUserSyncIframe/triggerPixel are stubbed no-ops by an ancestor
+          // beforeEach; auto-invoke their done() so each sync worker completes and
+          // the queueSync promise (awaited by prewarm) resolves.
+          utils.insertUserSyncIframe.callsFake((url, done) => { if (typeof done === 'function') done(); });
+          utils.triggerPixel.callsFake((url, done) => { if (typeof done === 'function') done(); });
+        });
+        afterEach(() => {
+          sandbox.restore();
+          resetSyncedStatus();
+        });
+        function cookieSyncRequests() {
+          return server.requests.filter(r => r.url.includes('cookie_sync'));
+        }
+
+        it('emits one cookie_sync on prewarm, then callBids reuses it (no second POST)', async () => {
+          const p = prewarmS2SCookieSync();
+          await waitForRequestCount(1);
+          expect(cookieSyncRequests()).to.have.length(1);
+          cookieSyncRequests()[0].respond(200, {}, JSON.stringify(csRes));
+          await p;
+          adapter.callBids(req, BID_REQUESTS, addBidResponse, done, ajax);
+          expect(cookieSyncRequests()).to.have.length(1);
+        });
+
+        it('callBids during an in-flight prewarm reuses the same sync (no second POST)', async () => {
+          const p = prewarmS2SCookieSync();
+          await waitForRequestCount(1);
+          adapter.callBids(req, BID_REQUESTS, addBidResponse, done, ajax);
+          expect(cookieSyncRequests()).to.have.length(1);
+          cookieSyncRequests()[0].respond(200, {}, JSON.stringify(csRes));
+          await p;
+        });
+
+        it('does nothing when the flag is off', async () => {
+          cfg.bliinkAwaitFirstSync = false;
+          config.setConfig({ s2sConfig: cfg });
+          await prewarmS2SCookieSync();
+          expect(cookieSyncRequests()).to.have.length(0);
+        });
+
+        it('does not prewarm without a consent-matching sync endpoint', async () => {
+          cfg.syncEndpoint = {};
+          config.setConfig({ s2sConfig: cfg });
+          await prewarmS2SCookieSync();
+          expect(cookieSyncRequests()).to.have.length(0);
+        });
+
+        it('isolates the cache across two s2sConfigs', async () => {
+          const cfgB = utils.deepClone(cfg);
+          cfgB.accountId = '999';
+          config.setConfig({ s2sConfig: [cfg, cfgB] });
+          const p = prewarmS2SCookieSync();
+          await waitForRequestCount(2);
+          expect(cookieSyncRequests()).to.have.length(2);
+          cookieSyncRequests().forEach(r => r.respond(200, {}, JSON.stringify(csRes)));
+          await p;
+        });
+
+        it('does not merge two configs with identical name/account/endpoints but different bidders', async () => {
+          const cfgA = utils.deepClone(cfg);
+          cfgA.name = 'shared';
+          cfgA.bidders = ['onetag'];
+          const cfgB = utils.deepClone(cfg);
+          cfgB.name = 'shared';
+          cfgB.bidders = ['pubmatic'];
+          config.setConfig({ s2sConfig: [cfgA, cfgB] });
+          const p = prewarmS2SCookieSync();
+          await waitForRequestCount(2);
+          expect(cookieSyncRequests()).to.have.length(2);
+          cookieSyncRequests().forEach(r => r.respond(200, {}, JSON.stringify(csRes)));
+          await p;
+        });
+
+        it('does not fire cookie_sync until consent is authoritative (deferred allConsent.promise)', async () => {
+          // Replace the immediate-resolve consent stub from beforeEach with a
+          // deferred promise we control, to prove prewarm awaits it.
+          sandbox.restore();
+          const local = sinon.createSandbox();
+          try {
+            let resolveConsent;
+            const deferred = new Promise(resolve => { resolveConsent = resolve; });
+            local.stub(allConsent, 'promise').get(() => deferred);
+            local.stub(allConsent, 'getConsentData').returns({ gdpr: undefined, usp: undefined, gpp: undefined });
+
+            const p = prewarmS2SCookieSync();
+            // Drain microtasks: a version missing `await allConsent.promise` would
+            // have fired /cookie_sync by now.
+            await Promise.resolve();
+            await Promise.resolve();
+            expect(cookieSyncRequests()).to.have.length(0);
+
+            resolveConsent();
+            await waitForRequestCount(1);
+            expect(cookieSyncRequests()).to.have.length(1);
+            cookieSyncRequests()[0].respond(200, {}, JSON.stringify(csRes));
+            await p;
+          } finally {
+            local.restore();
+          }
+        });
+
+        it('reset clears the prewarm cache so a later prewarm re-syncs', async () => {
+          const p1 = prewarmS2SCookieSync();
+          await waitForRequestCount(1);
+          cookieSyncRequests()[0].respond(200, {}, JSON.stringify(csRes));
+          await p1;
+          resetSyncedStatus();
+          const p2 = prewarmS2SCookieSync();
+          await waitForRequestCount(2);
+          expect(cookieSyncRequests()).to.have.length(2);
+          cookieSyncRequests()[1].respond(200, {}, JSON.stringify(csRes));
+          await p2;
+        });
       });
     });
     describe('when the response contains ext.prebid.fledge', () => {
