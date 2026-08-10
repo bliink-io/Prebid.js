@@ -26,6 +26,8 @@ import * as events from '../../src/events.js';
 import {ajax} from '../../src/ajax.js';
 import {hook} from '../../src/hook.js';
 import {hasPurpose1Consent} from '../../src/utils/gdpr.js';
+import {allConsent} from '../../src/consentHandler.js';
+import {getGlobal} from '../../src/prebidGlobal.js';
 import {buildPBSRequest, interpretPBSResponse} from './ortbConverter.js';
 import {useMetrics} from '../../src/utils/perfMetrics.js';
 import {isActivityAllowed} from '../../src/activities/rules.js';
@@ -41,6 +43,10 @@ const getConfig = config.getConfig;
 const TYPE = S2S.SRC;
 let _syncCount = 0;
 let _s2sConfigs: S2SConfig[];
+// Bliink: per-s2sConfig cache of the first PBS cookie-sync promise (keyed by a
+// stable config identity, not object ref), so a prewarm call and the later
+// callBids reuse the SAME sync (idempotent with _syncCount) even across clones.
+const bliinkFirstSyncCache = new Map<string, Promise<void>>();
 
 type Endpoint = string | {
   /**
@@ -265,6 +271,83 @@ getConfig('s2sConfig', ({s2sConfig}) => setS2sConfig(s2sConfig));
  */
 export function resetSyncedStatus() {
   _syncCount = 0;
+  bliinkFirstSyncCache.clear();
+}
+
+/**
+ * Bliink: stable cache key for an s2sConfig. Keyed by identity fields (name +
+ * accountId + endpoints + the resolved/deduped sync bidder list, order-normalized)
+ * rather than object reference, so prewarm and callBids agree even if setConfig
+ * clones the config object (distinct clones would miss a WeakMap). Every field is
+ * always included: two configs with the same account/endpoints but a DIFFERENT
+ * bidder list must not share one cookie_sync request. The whole tuple is
+ * JSON.stringify'd once (endpoints and the bidder array included as-is) so no
+ * name/endpoint/bidder value containing a delimiter can forge a collision.
+ */
+function bliinkConfigKey(s2sConfig: S2SConfig, syncBidders: string[]): string {
+  const bidders = (syncBidders ?? []).slice().sort();
+  return JSON.stringify([
+    s2sConfig.name ?? '',
+    s2sConfig.accountId ?? '',
+    s2sConfig.syncEndpoint ?? '',
+    s2sConfig.endpoint ?? '',
+    bidders
+  ]);
+}
+
+/**
+ * Bliink: resolve the S2S bidder list (aliases resolved, deduped) for a config.
+ * Same resolution as callBids so prewarm and callBids agree.
+ */
+function resolveSyncBidders(s2sConfig: S2SConfig) {
+  const s2sAliases = (s2sConfig.extPrebid && s2sConfig.extPrebid.aliases) ?? {};
+  return s2sConfig.bidders
+    .map(bidder => adapterManager.aliasRegistry[bidder] || s2sAliases[bidder] || bidder)
+    .filter((bidder, index, array) => (array.indexOf(bidder) === index));
+}
+
+/**
+ * Bliink: fire the PBS cookie-sync for a config at most once (per-config cache),
+ * returning a reusable promise. The global _syncCount guard still limits total
+ * syncs; a guard-skipped queueSync resolves immediately (nothing to await).
+ */
+function getOrQueueSync(s2sConfig: S2SConfig, syncBidders, gdprConsent, uspConsent, gppConsent): Promise<void> {
+  const key = bliinkConfigKey(s2sConfig, syncBidders);
+  const cached = bliinkFirstSyncCache.get(key);
+  if (cached) return cached;
+  const p = queueSync(syncBidders, gdprConsent, uspConsent, gppConsent, s2sConfig) ?? Promise.resolve();
+  bliinkFirstSyncCache.set(key, p);
+  return p;
+}
+
+/**
+ * Bliink prewarm: start the first PBS cookie-sync as soon as consent is
+ * authoritative (allConsent.promise), before the first auction, for opt-in
+ * (bliinkAwaitFirstSync) s2sConfigs only. Takes no external config: it iterates
+ * the internal _s2sConfigs. Fire-and-forget; callBids reuses the cached promise.
+ */
+export async function prewarmS2SCookieSync(): Promise<void> {
+  try {
+    await allConsent.promise;
+  } catch (e) {
+    logError('Bliink S2S cookie sync prewarm: consent wait failed', e);
+    return;
+  }
+  if (!Array.isArray(_s2sConfigs)) return;
+  const {gdpr: gdprConsent, usp: uspConsent, gpp: gppConsent} = allConsent.getConsentData();
+  const launched: Promise<void>[] = [];
+  _s2sConfigs.forEach((s2sConfig) => {
+    if (!s2sConfig || !s2sConfig.bliinkAwaitFirstSync) return;
+    if (!s2sConfig.syncEndpoint || !getMatchingConsentUrl(s2sConfig.syncEndpoint, gdprConsent)) return;
+    try {
+      launched.push(getOrQueueSync(s2sConfig, resolveSyncBidders(s2sConfig), gdprConsent, uspConsent, gppConsent));
+    } catch (e) {
+      logError('Bliink S2S cookie sync prewarm failed', e);
+    }
+  });
+  // Resolve when the launched syncs settle, so the returned promise's semantics
+  // are honest (not "resolved right after the forEach") and the API is testable.
+  await Promise.all(launched);
 }
 
 /**
@@ -605,12 +688,10 @@ export function PrebidServer() {
     if (Array.isArray(_s2sConfigs)) {
       let firstSyncPromise;
       if (s2sBidRequest.s2sConfig && s2sBidRequest.s2sConfig.syncEndpoint && getMatchingConsentUrl(s2sBidRequest.s2sConfig.syncEndpoint, gdprConsent)) {
-        const s2sAliases = (s2sBidRequest.s2sConfig.extPrebid && s2sBidRequest.s2sConfig.extPrebid.aliases) ?? {};
-        const syncBidders = s2sBidRequest.s2sConfig.bidders
-          .map(bidder => adapterManager.aliasRegistry[bidder] || s2sAliases[bidder] || bidder)
-          .filter((bidder, index, array) => (array.indexOf(bidder) === index));
-
-        firstSyncPromise = queueSync(syncBidders, gdprConsent, uspConsent, gppConsent, s2sBidRequest.s2sConfig);
+        const syncBidders = resolveSyncBidders(s2sBidRequest.s2sConfig);
+        // Bliink: reuse the prewarmed sync promise if present (same config),
+        // otherwise fire now. Idempotent via _syncCount + per-config cache.
+        firstSyncPromise = getOrQueueSync(s2sBidRequest.s2sConfig, syncBidders, gdprConsent, uspConsent, gppConsent);
       }
 
       const dispatchAuction = () => processPBSRequest(s2sBidRequest, bidRequests, ajax, {
@@ -800,3 +881,8 @@ function getAtagData(response) {
 }
 
 adapterManager.registerBidAdapter(new PrebidServer(), 'prebidServer');
+
+// Bliink: expose the opt-in cookie-sync prewarm so the wrapper can start the
+// first PBS cookie-sync right after consent, before the first auction. No-op
+// unless an s2sConfig opts in via bliinkAwaitFirstSync (default off).
+(getGlobal() as unknown as { prewarmS2SCookieSync?: () => Promise<void> }).prewarmS2SCookieSync = prewarmS2SCookieSync;
