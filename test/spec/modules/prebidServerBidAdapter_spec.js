@@ -3762,7 +3762,7 @@ describe('S2S Adapter', function () {
         syncCallbacks.forEach(callback => callback());
       });
 
-      it('waits for the first two FIFO sync workers before dispatching the first auction', async () => {
+      it('waits for the actual auction bidder while other syncs continue in the bounded queue', async () => {
         const syncCallbacks = [];
         const startedUrls = [];
         utils.insertUserSyncIframe.callsFake((url, done) => {
@@ -3772,7 +3772,7 @@ describe('S2S Adapter', function () {
         cfg.bliinkAwaitFirstSync = true;
         cfg.bliinkFirstSyncTimeout = 500;
         csRes.bidder_status = [
-          {bidder: 'onetag', no_cookie: true, usersync: {type: 'iframe', url: 'https://sync.test/onetag'}},
+          {bidder: 'appnexus', no_cookie: true, usersync: {type: 'iframe', url: 'https://sync.test/appnexus'}},
           {bidder: 'pubmatic', no_cookie: true, usersync: {type: 'iframe', url: 'https://sync.test/pubmatic'}},
           {bidder: 'smilewanted', no_cookie: true, usersync: {type: 'iframe', url: 'https://sync.test/smilewanted'}}
         ];
@@ -3780,20 +3780,19 @@ describe('S2S Adapter', function () {
         adapter.callBids(req, BID_REQUESTS, addBidResponse, done, ajax);
         expect(server.requests).to.have.length(1);
         server.requests[0].respond(200, {}, JSON.stringify(csRes));
+        await Promise.resolve();
+        await Promise.resolve();
 
-        expect(startedUrls).to.deep.equal(['https://sync.test/onetag', 'https://sync.test/pubmatic']);
+        expect(startedUrls).to.deep.equal(['https://sync.test/appnexus', 'https://sync.test/pubmatic']);
         expect(server.requests).to.have.length(1);
 
         syncCallbacks[0]();
         await Promise.resolve();
         expect(startedUrls).to.deep.equal([
-          'https://sync.test/onetag',
+          'https://sync.test/appnexus',
           'https://sync.test/pubmatic',
           'https://sync.test/smilewanted'
         ]);
-        expect(server.requests).to.have.length(1);
-
-        syncCallbacks[1]();
         await waitForRequestCount(2);
         expect(server.requests).to.have.length(2);
         const auctionBody = JSON.parse(server.requests[1].requestBody);
@@ -3803,7 +3802,7 @@ describe('S2S Adapter', function () {
         syncCallbacks[2]();
       });
 
-      it('uses requested bidder order when PBS returns sync statuses out of order', async () => {
+      it('prioritizes bidders in the actual auction when the config contains more bidders', async () => {
         const startedUrls = [];
         const syncCallbacks = [];
         utils.insertUserSyncIframe.callsFake((url, callback) => {
@@ -3812,25 +3811,105 @@ describe('S2S Adapter', function () {
         });
         cfg.bliinkAwaitFirstSync = true;
         cfg.bliinkFirstSyncTimeout = 500;
-        cfg.bidders = ['onetag', 'pubmatic', 'smilewanted', 'adyoulike'];
+        cfg.bidders = ['onetag', 'pubmatic', 'smilewanted', 'adyoulike', 'appnexus'];
         csRes.bidder_status = [
           {bidder: 'smilewanted', no_cookie: true, usersync: {type: 'iframe', url: 'https://sync.test/smilewanted'}},
           {bidder: 'adyoulike', no_cookie: true, usersync: {type: 'iframe', url: 'https://sync.test/adyoulike'}},
           {bidder: 'pubmatic', no_cookie: true, usersync: {type: 'iframe', url: 'https://sync.test/pubmatic'}},
-          {bidder: 'onetag', no_cookie: true, usersync: {type: 'iframe', url: 'https://sync.test/onetag'}}
+          {bidder: 'onetag', no_cookie: true, usersync: {type: 'iframe', url: 'https://sync.test/onetag'}},
+          {bidder: 'appnexus', no_cookie: true, usersync: {type: 'iframe', url: 'https://sync.test/appnexus'}}
         ];
 
         adapter.callBids(req, BID_REQUESTS, addBidResponse, done, ajax);
         server.requests[0].respond(200, {}, JSON.stringify(csRes));
+        await Promise.resolve();
+        await Promise.resolve();
 
         expect(startedUrls).to.deep.equal([
-          'https://sync.test/onetag',
-          'https://sync.test/pubmatic'
+          'https://sync.test/appnexus',
+          'https://sync.test/smilewanted'
         ]);
 
-        syncCallbacks.slice(0, 2).forEach(callback => callback());
+        syncCallbacks[0]();
         await waitForRequestCount(2);
-        syncCallbacks.slice(2).forEach(callback => callback());
+        syncCallbacks.slice(1).forEach(callback => callback());
+      });
+
+      it('resolves chained S2S aliases before prioritizing cookie syncs', async () => {
+        const startedUrls = [];
+        const syncCallbacks = [];
+        utils.insertUserSyncIframe.callsFake((url, callback) => {
+          startedUrls.push(url);
+          syncCallbacks.push(callback);
+        });
+        cfg.bliinkAwaitFirstSync = true;
+        cfg.bliinkFirstSyncTimeout = 500;
+        cfg.bidders = ['gmc-appnexus', 'pubmatic'];
+        cfg.extPrebid = {
+          aliases: {
+            'gmc-appnexus': 'appnexus-middle',
+            'appnexus-middle': 'appnexus'
+          }
+        };
+        req.ad_units[0].bids[0].bidder = 'gmc-appnexus';
+        csRes.bidder_status = [
+          {bidder: 'pubmatic', no_cookie: true, usersync: {type: 'iframe', url: 'https://sync.test/pubmatic'}},
+          {bidder: 'appnexus', no_cookie: true, usersync: {type: 'iframe', url: 'https://sync.test/appnexus'}}
+        ];
+
+        adapter.callBids(req, BID_REQUESTS, addBidResponse, done, ajax);
+        expect(JSON.parse(server.requests[0].requestBody).bidders).to.deep.equal(['appnexus', 'pubmatic']);
+        server.requests[0].respond(200, {}, JSON.stringify(csRes));
+        await Promise.resolve();
+        await Promise.resolve();
+
+        expect(startedUrls).to.deep.equal([
+          'https://sync.test/appnexus',
+          'https://sync.test/pubmatic'
+        ]);
+        syncCallbacks[0]();
+        await waitForRequestCount(2);
+        syncCallbacks[1]();
+      });
+
+      it('waits for every bidder present across multiple auction impressions', async () => {
+        const startedUrls = [];
+        const syncCallbacks = new Map();
+        utils.insertUserSyncIframe.callsFake((url, callback) => {
+          startedUrls.push(url);
+          syncCallbacks.set(url, callback);
+        });
+        cfg.bliinkAwaitFirstSync = true;
+        cfg.bliinkFirstSyncTimeout = 500;
+        cfg.bidders = ['appnexus', 'pubmatic', 'smilewanted'];
+        req.ad_units.push({
+          ...utils.deepClone(req.ad_units[0]),
+          code: 'second-imp',
+          bids: [{bidder: 'pubmatic', bid_id: 'pubmatic-bid'}]
+        });
+        csRes.bidder_status = [
+          {bidder: 'smilewanted', no_cookie: true, usersync: {type: 'iframe', url: 'https://sync.test/smilewanted'}},
+          {bidder: 'pubmatic', no_cookie: true, usersync: {type: 'iframe', url: 'https://sync.test/pubmatic'}},
+          {bidder: 'appnexus', no_cookie: true, usersync: {type: 'iframe', url: 'https://sync.test/appnexus'}}
+        ];
+
+        adapter.callBids(req, BID_REQUESTS, addBidResponse, done, ajax);
+        server.requests[0].respond(200, {}, JSON.stringify(csRes));
+        await Promise.resolve();
+        await Promise.resolve();
+
+        expect(startedUrls).to.deep.equal([
+          'https://sync.test/appnexus',
+          'https://sync.test/pubmatic'
+        ]);
+        syncCallbacks.get('https://sync.test/appnexus')();
+        await Promise.resolve();
+        expect(startedUrls).to.include('https://sync.test/smilewanted');
+        expect(server.requests).to.have.length(1);
+
+        syncCallbacks.get('https://sync.test/pubmatic')();
+        await waitForRequestCount(2);
+        syncCallbacks.get('https://sync.test/smilewanted')();
       });
 
       it('dispatches after the bounded wait while sync workers keep running', async () => {
@@ -3844,13 +3923,15 @@ describe('S2S Adapter', function () {
         cfg.bliinkAwaitFirstSync = true;
         cfg.bliinkFirstSyncTimeout = 50;
         csRes.bidder_status = [
-          {bidder: 'onetag', no_cookie: true, usersync: {type: 'iframe', url: 'https://sync.test/onetag'}},
+          {bidder: 'appnexus', no_cookie: true, usersync: {type: 'iframe', url: 'https://sync.test/appnexus'}},
           {bidder: 'pubmatic', no_cookie: true, usersync: {type: 'iframe', url: 'https://sync.test/pubmatic'}},
           {bidder: 'smilewanted', no_cookie: true, usersync: {type: 'iframe', url: 'https://sync.test/smilewanted'}}
         ];
 
         adapter.callBids(req, BID_REQUESTS, addBidResponse, done, ajax);
         server.requests[0].respond(200, {}, JSON.stringify(csRes));
+        await Promise.resolve();
+        await Promise.resolve();
         expect(server.requests).to.have.length(1);
         expect(syncCallbacks).to.have.length(2);
 
@@ -3860,7 +3941,7 @@ describe('S2S Adapter', function () {
         syncCallbacks[0]();
         await clock.tickAsync(0);
         expect(startedUrls).to.deep.equal([
-          'https://sync.test/onetag',
+          'https://sync.test/appnexus',
           'https://sync.test/pubmatic',
           'https://sync.test/smilewanted'
         ]);
@@ -3887,17 +3968,20 @@ describe('S2S Adapter', function () {
         server.requests[0].respond(500, {}, 'sync failed');
         await Promise.resolve();
         await Promise.resolve();
-
-        expect(server.requests).to.have.length(2);
+        await Promise.resolve();
+        await waitForRequestCount(2);
       });
 
       it('fails open when a bidder sync throws', async () => {
         cfg.bliinkAwaitFirstSync = true;
         cfg.bliinkFirstSyncTimeout = 500;
+        csRes.bidder_status[0].bidder = 'appnexus';
         utils.insertUserSyncIframe.throws(new Error('sync iframe failed'));
 
         adapter.callBids(req, BID_REQUESTS, addBidResponse, done, ajax);
         server.requests[0].respond(200, {}, JSON.stringify(csRes));
+        await Promise.resolve();
+        await Promise.resolve();
         await waitForRequestCount(2);
 
         expect(server.requests).to.have.length(2);
@@ -3938,7 +4022,7 @@ describe('S2S Adapter', function () {
           return server.requests.filter(r => r.url.includes('cookie_sync'));
         }
 
-        it('emits one cookie_sync on prewarm, then callBids reuses it (no second POST)', async () => {
+        it('emits one cookie_sync on prewarm, then auctions and refreshes reuse it', async () => {
           const p = prewarmS2SCookieSync();
           await waitForRequestCount(1);
           expect(cookieSyncRequests()).to.have.length(1);
@@ -3946,6 +4030,10 @@ describe('S2S Adapter', function () {
           await p;
           adapter.callBids(req, BID_REQUESTS, addBidResponse, done, ajax);
           expect(cookieSyncRequests()).to.have.length(1);
+          adapter.callBids(req, BID_REQUESTS, addBidResponse, done, ajax);
+          expect(cookieSyncRequests()).to.have.length(1);
+          await Promise.resolve();
+          sinon.assert.calledOnce(utils.insertUserSyncIframe);
         });
 
         it('callBids during an in-flight prewarm reuses the same sync (no second POST)', async () => {
