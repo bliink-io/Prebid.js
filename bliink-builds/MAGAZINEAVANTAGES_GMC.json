@@ -36,6 +36,7 @@
     "pairIdSystem",
     "pubmaticIdSystem",
     "pubProvidedIdSystem",
+    "sharedIdSystem",
     "rtdModule",
     "adagioRtdProvider",
     "sirdataRtdProvider",
