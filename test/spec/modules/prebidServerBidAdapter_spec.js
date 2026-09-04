@@ -2066,23 +2066,38 @@ describe('S2S Adapter', function () {
           expect(callCookieSync().bidders).to.deep.equal(['appnexus']);
         });
 
-        it('adds a sync-only bidder to cookie_sync but not to the auction, deduped', function () {
+        it('adds a sync-only bidder to cookie_sync (with consent) but not to the auction', function () {
+          s2sConfig.endpoint = { p1Consent: 'https://prebid.adnxs.com/pbs/v1/openrtb2/auction' };
           s2sConfig.syncOnlyBidders = ['richaudience'];
-          const syncPayload = callCookieSync();
-          // Sync-only bidder is present in the cookie_sync request alongside the
-          // auction bidder (non-vacuous: both must appear).
+          // Real consent on the bid request so we can assert it is transmitted.
+          bidderReqs[0].gdprConsent = mockTCF();
+          bidderReqs[0].uspConsent = '1YNN';
+
+          const s2sBidRequest = utils.deepClone(REQUEST);
+          s2sBidRequest.s2sConfig = s2sConfig;
+          config.setConfig({ s2sConfig });
+          adapter.callBids(s2sBidRequest, bidderReqs, addBidResponse, done, ajax);
+
+          // cookie_sync request: sync-only bidder present alongside the auction bidder,
+          // and consent/account actually transmitted (not just claimed).
+          const cookieReq = server.requests.find(r => r.url.includes('cookie_sync'));
+          expect(cookieReq, 'a cookie_sync request must have been sent').to.exist;
+          const syncPayload = JSON.parse(cookieReq.requestBody);
           expect(syncPayload.bidders).to.include('richaudience');
           expect(syncPayload.bidders).to.include('appnexus');
-          // Account/consent are preserved on the cookie_sync payload.
           expect(syncPayload.account).to.equal(s2sConfig.accountId);
-          // The auction bidder list is untouched: syncOnly never enters the auction.
-          expect(s2sConfig.bidders).to.deep.equal(['appnexus']);
-          const auctionRequests = server.requests.filter(r => !r.url.includes('cookie_sync'));
-          auctionRequests.forEach(r => {
-            const body = JSON.parse(r.requestBody);
-            (body.imp || []).forEach(imp => {
-              expect(Object.keys(imp.ext?.prebid?.bidder || {})).to.not.include('richaudience');
-            });
+          expect(syncPayload.gdpr).to.equal(1);
+          expect(syncPayload.gdpr_consent).to.equal('mockConsent');
+          expect(syncPayload.us_privacy).to.equal('1YNN');
+
+          // auction request: must exist and carry imps, and NONE may reference the
+          // sync-only bidder in the actual OpenRTB sent (non-vacuous).
+          const auctionReqs = server.requests.filter(r => r.url.includes('openrtb2/auction'));
+          expect(auctionReqs, 'an auction request must have been sent').to.have.length.greaterThan(0);
+          const auctionBody = JSON.parse(auctionReqs[0].requestBody);
+          expect(auctionBody.imp, 'auction must contain impressions').to.have.length.greaterThan(0);
+          auctionBody.imp.forEach(imp => {
+            expect(Object.keys(imp.ext?.prebid?.bidder || {})).to.not.include('richaudience');
           });
         });
 
