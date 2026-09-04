@@ -81,6 +81,14 @@ type S2SConfig = {
    */
   bidders?: BidderCode[];
   /**
+   * Extra bidders to request user syncs for via Prebid Server cookie_sync ONLY,
+   * without running them server-side in the auction. Their codes are added to the
+   * cookie_sync bidder list (deduped against `bidders`) but never enter the
+   * OpenRTB request/imps, so a client-only bidder keeps bidding client-side while
+   * its Prebid Server uid gets synced. Empty by default (feature off).
+   */
+  syncOnlyBidders?: BidderCode[];
+  /**
    * Allow Prebid Server to bid on behalf of bidders that are not explicitly listed in the adUnit.
    * Defaults to false.
    */
@@ -172,6 +180,7 @@ type S2SConfig = {
 
 export const s2sDefaultConfig: Partial<S2SConfig> = {
   bidders: Object.freeze([]) as any,
+  syncOnlyBidders: Object.freeze([]) as any,
   syncTimeout: 1000,
   adapter: 'prebidServer',
   allowUnknownBidderCodes: false,
@@ -309,8 +318,15 @@ function bliinkConfigKey(s2sConfig: S2SConfig): string {
  */
 function resolveSyncBidders(s2sConfig: S2SConfig) {
   const s2sAliases = (s2sConfig.extPrebid && s2sConfig.extPrebid.aliases) ?? {};
-  return s2sConfig.bidders
-    .map(bidder => resolveSyncBidderRoot(bidder, s2sAliases))
+  // Auction bidders drive both the auction and their cookie_sync.
+  const auctionSyncBidders = s2sConfig.bidders
+    .map(bidder => resolveSyncBidderRoot(bidder, s2sAliases));
+  // syncOnlyBidders are added to cookie_sync ONLY (deduped, alias-resolved the
+  // same way). They never touch the auction (processPBSRequest uses s2sConfig.bidders).
+  const syncOnly = (s2sConfig.syncOnlyBidders ?? [])
+    .map(bidder => resolveSyncBidderRoot(bidder, s2sAliases));
+  return auctionSyncBidders
+    .concat(syncOnly)
     .filter((bidder, index, array) => (array.indexOf(bidder) === index));
 }
 

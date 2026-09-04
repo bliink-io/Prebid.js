@@ -2061,6 +2061,38 @@ describe('S2S Adapter', function () {
         });
       });
 
+      describe('syncOnlyBidders', () => {
+        it('does not change the cookie_sync bidders when unset (feature off by default)', function () {
+          expect(callCookieSync().bidders).to.deep.equal(['appnexus']);
+        });
+
+        it('adds a sync-only bidder to cookie_sync but not to the auction, deduped', function () {
+          s2sConfig.syncOnlyBidders = ['richaudience'];
+          const syncPayload = callCookieSync();
+          // Sync-only bidder is present in the cookie_sync request alongside the
+          // auction bidder (non-vacuous: both must appear).
+          expect(syncPayload.bidders).to.include('richaudience');
+          expect(syncPayload.bidders).to.include('appnexus');
+          // Account/consent are preserved on the cookie_sync payload.
+          expect(syncPayload.account).to.equal(s2sConfig.accountId);
+          // The auction bidder list is untouched: syncOnly never enters the auction.
+          expect(s2sConfig.bidders).to.deep.equal(['appnexus']);
+          const auctionRequests = server.requests.filter(r => !r.url.includes('cookie_sync'));
+          auctionRequests.forEach(r => {
+            const body = JSON.parse(r.requestBody);
+            (body.imp || []).forEach(imp => {
+              expect(Object.keys(imp.ext?.prebid?.bidder || {})).to.not.include('richaudience');
+            });
+          });
+        });
+
+        it('dedups a sync-only bidder that is already an auction bidder', function () {
+          s2sConfig.syncOnlyBidders = ['appnexus'];
+          const bidders = callCookieSync().bidders;
+          expect(bidders.filter(b => b === 'appnexus')).to.have.length(1);
+        });
+      });
+
       describe('limit', () => {
         it('is added to request if userSyncLimit is greater than 0', function () {
           s2sConfig.userSyncLimit = 1;
